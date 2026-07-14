@@ -1,0 +1,24 @@
+{
+  "name": "s2-durable-agents-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx run.ts",
+    "dev": "mastra dev",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mastra/core": "^1.51.0",
+    "@mastra/libsql": "^1.16.0",
+    "@mastra/memory": "^1.23.0",
+    "@s2-dev/mastra-pubsub": "file:../..",
+    "@s2-dev/streamstore": "^0.24.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "mastra": "^1.0.0",
+    "tsx": "^4.22.4",
+    "typescript": "^5"
+  }
+}

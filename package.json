@@ -1,0 +1,56 @@
+{
+  "name": "@s2-dev/mastra-pubsub",
+  "version": "0.1.1",
+  "description": "Durable Mastra PubSub backed by S2 streams for Durable Agents",
+  "license": "MIT",
+  "type": "module",
+  "homepage": "https://s2.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/s2-streamstore/mastra-pubsub.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "check": "tsc --noEmit",
+    "format": "biome format --write",
+    "lint": "biome check",
+    "test": "vitest --run",
+    "changeset": "changeset",
+    "version": "changeset version",
+    "release": "changeset publish",
+    "prepublishOnly": "bun run build"
+  },
+  "sideEffects": false,
+  "dependencies": {
+    "@s2-dev/streamstore": "^0.24.3"
+  },
+  "peerDependencies": {
+    "@mastra/core": ">=1.45.0-0 <2.0.0-0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.2.5",
+    "@changesets/cli": "^2.29.7",
+    "@mastra/core": "1.50.2-alpha.0",
+    "@types/node": "^24.9.2",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.10"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}

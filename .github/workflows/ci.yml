@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run check
+
+      - name: Lint
+        run: bun run lint
+
+  build-s2-lite:
+    name: Build S2-lite
+    uses: s2-streamstore/s2/.github/workflows/build-s2-lite.yml@main
+
+  s2-lite-integration:
+    name: S2-lite Integration
+    needs: build-s2-lite
+    uses: s2-streamstore/s2/.github/workflows/sdk-tests.yml@main
+    with:
+      server-binary: server
+      server-args: "--port 8080"
+      server-port: 8080
+      sdks: |
+        [
+          {
+            "name": "mastra-pubsub",
+            "repo": "${{ github.repository }}",
+            "ref": "${{ github.ref }}",
+            "lang": "bun",
+            "bun-version": "latest",
+            "test_cmd": "S2_LITE=1 bun run test"
+          }
+        ]
