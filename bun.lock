@@ -26,8 +26,9 @@
         "@mastra/core": "1.51.0",
         "@mastra/libsql": "^1.16.0",
         "@mastra/memory": "^1.23.0",
+        "@s2-dev/mastra-pubsub": "file:../..",
         "@s2-dev/streamstore": "^0.24.3",
-        "zod": "3.25.76",
+        "zod": "^3.25.76",
       },
       "devDependencies": {
         "@types/node": "^22",
@@ -421,6 +422,8 @@
     "@rollup/rollup-win32-x64-gnu": ["@rollup/rollup-win32-x64-gnu@4.62.2", "", { "os": "win32", "cpu": "x64" }, "sha512-T6xr6ucWSFto+VGajA8YH26LdpHRuP4YLHEKAtCWvJDOlnmWcDZVCI2Jmjr+IFHDlt2zRaTAKE4tfjTaWLgJBg=="],
 
     "@rollup/rollup-win32-x64-msvc": ["@rollup/rollup-win32-x64-msvc@4.62.2", "", { "os": "win32", "cpu": "x64" }, "sha512-BfzEnDJOt9T8M989/lA37EcJgat01wLRnoi5dQf3QzOH7jzpqTAzdDbVfRljVr5r+jzKqpbHeyOfAaXxAd0PAA=="],
+
+    "@s2-dev/mastra-pubsub": ["@s2-dev/mastra-pubsub@root:", {}],
 
     "@s2-dev/streamstore": ["@s2-dev/streamstore@0.24.3", "", { "dependencies": { "@protobuf-ts/runtime": "^2.11.1", "debug": "^4.4.3" } }, "sha512-X72qc/bSI/xvF7AgxHnPsgyNdgjsUtXlqa9AohIpUbZe94aLBinPAgKNcd8KCGo5cftPBcsKVhJZot49Vb687Q=="],
 
