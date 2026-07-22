@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>S2 Agent</title>
+		<link rel="stylesheet" href="/styles.css" />
+		<script type="module" src="/app.js"></script>
+	</head>
+	<body>
+		<main class="chat">
+			<header>
+				<div class="identity">
+					<div>
+						<strong>Research agent</strong>
+						<span id="status">Ready</span>
+					</div>
+				</div>
+				<button id="new-chat" class="quiet" type="button">New chat</button>
+			</header>
+
+			<section id="messages" class="messages" aria-live="polite">
+				<p id="empty-state">Ask me anything.</p>
+				<div id="conversation" hidden>
+					<div class="message user-message">
+						<p id="user-message"></p>
+					</div>
+					<div class="message assistant-message">
+						<div class="answer">
+							<pre id="transcript"></pre>
+							<span id="typing" class="typing" hidden><i></i><i></i><i></i></span>
+						</div>
+					</div>
+				</div>
+			</section>
+
+			<form id="prompt-form">
+				<textarea
+					id="prompt"
+					rows="1"
+					placeholder="Message the agent"
+					aria-label="Message the agent"
+				></textarea>
+				<button id="send" type="submit" aria-label="Send message">↑</button>
+			</form>
+		</main>
+	</body>
+</html>

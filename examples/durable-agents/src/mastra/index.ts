@@ -6,8 +6,9 @@
  */
 import { Mastra } from "@mastra/core";
 import { LibSQLStore } from "@mastra/libsql";
-import { S2PubSub } from "@s2-dev/mastra-pubsub";
 import { S2Environment } from "@s2-dev/streamstore";
+
+import { S2PubSub } from "../../../../src/index.js";
 
 import { durableResearchAgent } from "./agents/research-agent.js";
 
@@ -20,14 +21,14 @@ const storage = new LibSQLStore({ id: "mastra-storage", url: "file:./mastra.db" 
 // Resumable streams backed by S2. `endpoints` picks up S2_ACCOUNT_ENDPOINT /
 // S2_BASIN_ENDPOINT for s2-lite.
 const { endpoints } = S2Environment.parse();
-const pubsub = new S2PubSub({
+export const pubsub = new S2PubSub({
 	accessToken: process.env.S2_ACCESS_TOKEN,
 	basin: process.env.S2_BASIN,
 	endpoints,
 });
 
 export const mastra = new Mastra({
-	agents: { durableResearchAgent },
+	agents: { "durable-research-agent": durableResearchAgent },
 	storage,
 	pubsub,
 });

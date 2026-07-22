@@ -3,12 +3,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "tsx run.ts",
+    "start": "tsx --env-file=.env server.ts",
+    "cli": "tsx --env-file=.env run.ts",
+    "studio": "mastra dev",
     "dev": "mastra dev",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify:pubsub-wiring": "bun scripts/verify-pubsub-wiring.ts"
   },
   "dependencies": {
-    "@mastra/core": "^1.51.0",
+    "@mastra/core": "1.51.0",
     "@mastra/libsql": "^1.16.0",
     "@mastra/memory": "^1.23.0",
     "@s2-dev/mastra-pubsub": "file:../..",
