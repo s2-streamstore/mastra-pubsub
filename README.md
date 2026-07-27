@@ -102,6 +102,13 @@ const client = new S2({
 const pubsub = new S2PubSub({ client, basin: process.env.S2_BASIN! });
 ```
 
+Events use JavaScript's standard `JSON.stringify` semantics. Before appending,
+the adapter validates the exact serialized record, so top-level values that
+cannot represent the required event fields — for example `data: undefined`, a
+function, a symbol, a bigint, or circular data — reject `publish` instead of
+leaving an unreadable record in the stream. As with `JSON.stringify`, optional
+nested properties whose value is `undefined` are omitted.
+
 Persisted-topic consumer groups are rejected because this adapter implements broadcast observation, matching durable-agent stream semantics.
 
 ## Distributed leases

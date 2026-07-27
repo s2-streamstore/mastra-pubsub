@@ -83,6 +83,15 @@ class S2RecordDecodeError extends Error {
 	}
 }
 
+class S2RecordEncodeError extends TypeError {
+	constructor(cause: unknown) {
+		super("S2PubSub event could not be serialized as a valid Mastra event", {
+			cause,
+		});
+		this.name = "S2RecordEncodeError";
+	}
+}
+
 /** Raised when the requested replay position has been trimmed. */
 export class S2ReplayGapError extends Error {
 	constructor(
@@ -110,13 +119,21 @@ function isAbortError(error: unknown): boolean {
 	return error instanceof Error && error.name === "AbortError";
 }
 
-/** Serialize an event, rejecting unsupported values. */
+/** Serialize an event, rejecting anything that would poison its persisted stream. */
 function encodeEvent(event: Event): string {
-	const body = JSON.stringify(event);
-	if (body === undefined) {
-		throw new TypeError("S2PubSub event could not be serialized");
+	try {
+		const body = JSON.stringify(event);
+		if (body === undefined) {
+			throw new TypeError("event did not produce JSON");
+		}
+		// JSON.stringify can silently omit required values such as `data:
+		// undefined`. Validate the exact bytes before appending so every record we
+		// write is guaranteed to be readable by this adapter.
+		decodeEvent(body);
+		return body;
+	} catch (error) {
+		throw new S2RecordEncodeError(error);
 	}
-	return body;
 }
 
 /** Whether a value is a plain JSON object. */
@@ -132,43 +149,47 @@ function logError(logger: Logger, message: string, error: unknown): void {
 	}
 }
 
+/** Decode and validate one serialized Mastra event. */
+function decodeEvent(body: string): Omit<Event, "index"> {
+	const decoded: unknown = JSON.parse(body);
+	if (!isRecord(decoded)) {
+		throw new TypeError("record body must be a JSON object");
+	}
+	if (
+		typeof decoded.id !== "string" ||
+		typeof decoded.type !== "string" ||
+		typeof decoded.runId !== "string" ||
+		!("data" in decoded) ||
+		(typeof decoded.createdAt !== "string" &&
+			typeof decoded.createdAt !== "number") ||
+		(decoded.deliveryAttempt !== undefined &&
+			typeof decoded.deliveryAttempt !== "number")
+	) {
+		throw new TypeError("record body is not a valid Mastra event");
+	}
+
+	const createdAt = new Date(decoded.createdAt);
+	if (Number.isNaN(createdAt.getTime())) {
+		throw new TypeError("record createdAt is invalid");
+	}
+
+	return {
+		id: decoded.id,
+		type: decoded.type,
+		data: decoded.data,
+		runId: decoded.runId,
+		createdAt,
+		deliveryAttempt: decoded.deliveryAttempt ?? 1,
+	};
+}
+
 /** Decode and validate an event, using `seqNum` as its index. */
 function eventFromRecord(
 	record: Pick<ReadRecord<"string">, "body" | "seqNum">,
 	topic: string,
 ): Event {
 	try {
-		const decoded: unknown = JSON.parse(record.body);
-		if (!isRecord(decoded)) {
-			throw new TypeError("record body must be a JSON object");
-		}
-		if (
-			typeof decoded.id !== "string" ||
-			typeof decoded.type !== "string" ||
-			typeof decoded.runId !== "string" ||
-			!("data" in decoded) ||
-			(typeof decoded.createdAt !== "string" &&
-				typeof decoded.createdAt !== "number") ||
-			(decoded.deliveryAttempt !== undefined &&
-				typeof decoded.deliveryAttempt !== "number")
-		) {
-			throw new TypeError("record body is not a valid Mastra event");
-		}
-
-		const createdAt = new Date(decoded.createdAt);
-		if (Number.isNaN(createdAt.getTime())) {
-			throw new TypeError("record createdAt is invalid");
-		}
-
-		return {
-			id: decoded.id,
-			type: decoded.type,
-			data: decoded.data,
-			runId: decoded.runId,
-			createdAt,
-			index: record.seqNum,
-			deliveryAttempt: decoded.deliveryAttempt ?? 1,
-		};
+		return { ...decodeEvent(record.body), index: record.seqNum };
 	} catch (error) {
 		throw new S2RecordDecodeError(topic, record.seqNum, error);
 	}
