@@ -6,7 +6,7 @@ Each durable topic maps to one S2 stream. S2 provides both retained history and 
 
 ## Demo
 
-The custom browser demo in [examples/durable-agents](examples/durable-agents) shows a Mastra Durable Agent streaming through S2, surviving a browser refresh, and replaying from the same durable log.
+The custom browser demo in [examples/durable-agents](examples/durable-agents) shows a Mastra Durable Agent streaming through S2, handling a browser refresh, and replaying from the same durable log.
 
 ![A durable agent handling a browser refresh](assets/demo.gif)
 
@@ -20,7 +20,7 @@ bun install
 bun start
 ```
 
-Every conversation gets its own link at `/chat/<runId>`, so a refresh, a second
+Every conversation gets its own link at `/chat/<runId>`. A refresh, a second
 tab, or someone else opening the link all replay the same run from S2. Once
 Mastra clears a finished run's topic (`cleanupTimeoutMs`), the link returns 404
 instead of hanging.
