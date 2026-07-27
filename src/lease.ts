@@ -122,9 +122,9 @@ function leaseRecord(state: LeaseState) {
  *
  * A lease key identifies both a thread and its topic, so lease state lives in
  * that thread's stream rather than one of its own; readers skip it (see
- * {@link isControlRecord}). Updates are conditional on a fencing token 
- * so event appends never conflict with them, and each change
- * of owner rotates the token to fence the previous owner off.
+ * {@link isControlRecord}). Updates are conditional on a fencing token so event
+ * appends never conflict with them, and each change of owner rotates the token
+ * to fence the previous owner off.
  *
  * The stream is the only state, so nothing is cached between calls. Expiry is
  * wall-clock, so keep process clocks synchronized and TTLs at or under
