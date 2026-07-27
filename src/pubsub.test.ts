@@ -373,6 +373,76 @@ describe("S2PubSub read-session live delivery", () => {
 		await pubsub.unsubscribe("agent.stream.run-1", cb);
 	});
 
+	it.each([
+		["undefined", undefined],
+		["a function", () => undefined],
+		["a symbol", Symbol("not-json")],
+		["a bigint", 1n],
+	])(
+		"rejects top-level event data containing %s before appending",
+		async (_description, data) => {
+			const basin = new FakeBasin();
+			const pubsub = createPubSub(basin);
+			const stream = basin.stream("mastra/durable/agent.stream.run-1");
+
+			await expect(
+				pubsub.publish("agent.stream.run-1", {
+					...event(0),
+					data,
+				}),
+			).rejects.toThrow(
+				"S2PubSub event could not be serialized as a valid Mastra event",
+			);
+
+			expect(stream.records).toHaveLength(0);
+		},
+	);
+
+	it("rejects circular event data before appending", async () => {
+		const basin = new FakeBasin();
+		const pubsub = createPubSub(basin);
+		const stream = basin.stream("mastra/durable/agent.stream.run-1");
+		const data: Record<string, unknown> = {};
+		data.self = data;
+
+		await expect(
+			pubsub.publish("agent.stream.run-1", { ...event(0), data }),
+		).rejects.toThrow(
+			"S2PubSub event could not be serialized as a valid Mastra event",
+		);
+		expect(stream.records).toHaveLength(0);
+	});
+
+	it("rejects runtime-invalid event fields before appending", async () => {
+		const basin = new FakeBasin();
+		const pubsub = createPubSub(basin);
+		const stream = basin.stream("mastra/durable/agent.stream.run-1");
+
+		await expect(
+			pubsub.publish("agent.stream.run-1", {
+				...event(0),
+				runId: undefined as unknown as string,
+			}),
+		).rejects.toThrow(
+			"S2PubSub event could not be serialized as a valid Mastra event",
+		);
+		expect(stream.records).toHaveLength(0);
+	});
+
+	it("preserves JSON.stringify semantics for optional nested values", async () => {
+		const basin = new FakeBasin();
+		const pubsub = createPubSub(basin);
+
+		await pubsub.publish("agent.stream.run-1", {
+			...event(0),
+			data: { present: "yes", optional: undefined },
+		});
+
+		expect(await pubsub.getHistory("agent.stream.run-1")).toEqual([
+			expect.objectContaining({ data: { present: "yes" }, index: 0 }),
+		]);
+	});
+
 	it("logs rejected async subscriber callbacks without stopping delivery", async () => {
 		const basin = new FakeBasin();
 		const logger = createTestLogger();
