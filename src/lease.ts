@@ -1,34 +1,18 @@
 import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
-import type { CachingPubSubOptions, LeaseProvider } from "@mastra/core/events";
-import type {
-	ReadRecord,
-	ReadStart,
-	S2Basin,
-	S2Stream,
-} from "@s2-dev/streamstore";
+import type { LeaseProvider } from "@mastra/core/events";
+import type { ReadRecord, S2Basin, S2Stream } from "@s2-dev/streamstore";
 import {
 	AppendInput,
 	AppendRecord,
 	FencingTokenMismatchError,
-	RangeNotSatisfiableError,
-	randomToken,
-	S2Error,
 } from "@s2-dev/streamstore";
-
-type Logger = CachingPubSubOptions["logger"];
 
 /** Mastra's `AGENT_THREAD_STREAM_TOPIC_PREFIX`. */
 const THREAD_TOPIC_PREFIX = "agent.thread-stream.";
 
-/** Header marking a legacy or oversized-owner lease state record. */
-const LEASE_HEADER_NAME = "mastra-lease";
-
 /** Maximum CAS attempts per operation. */
 const CAS_ATTEMPTS = 3;
-
-/** Records scanned for legacy state before falling back to a time window. */
-const LEGACY_TAIL_LOOKBACK_RECORDS = 500;
 
 /** A token that this provider never installs, used to observe the current token. */
 const TOKEN_PROBE = "!";
@@ -42,28 +26,14 @@ const TOKEN_EXPIRY_BYTES = 6;
 const TOKEN_NONCE_OFFSET = TOKEN_EXPIRY_OFFSET + TOKEN_EXPIRY_BYTES;
 const TOKEN_NONCE_BYTES = 3;
 const TOKEN_OWNER_OFFSET = TOKEN_NONCE_OFFSET + TOKEN_NONCE_BYTES;
-const MAX_INLINE_OWNER_BYTES = 16;
-const MAX_INLINE_TOKEN_BYTES = TOKEN_OWNER_OFFSET + MAX_INLINE_OWNER_BYTES;
+const MAX_OWNER_BYTES = 16;
+const MAX_TOKEN_BYTES = TOKEN_OWNER_OFFSET + MAX_OWNER_BYTES;
+const MAX_EXPIRY = 2 ** (TOKEN_EXPIRY_BYTES * 8) - 1;
 const UUID_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/**
- * Longest TTL this provider supports.
- *
- * Inline lease tokens can represent longer expiries, but legacy and oversized
- * owner IDs use the bounded record fallback. One limit keeps both formats
- * interoperable and preserves the existing operational contract.
- */
-export const MAX_LEASE_TTL_MS = 60_000;
-
-/**
- * Legacy state older than this cannot still be active because every supported
- * TTL is at most {@link MAX_LEASE_TTL_MS}.
- */
-const LEGACY_LOOKBACK_MS = MAX_LEASE_TTL_MS * 4;
-
 interface LeaseState {
-	readonly owner: string | null;
+	readonly owner: string;
 	readonly expiresAt: number;
 	/** Fencing token guarding the next update. */
 	readonly token: string;
@@ -72,10 +42,6 @@ interface LeaseState {
 interface LeaseSnapshot {
 	readonly token: string;
 	readonly lease?: LeaseState;
-}
-
-interface LeaseUpdate {
-	readonly records: readonly AppendRecord[];
 }
 
 type SwapResult =
@@ -87,56 +53,18 @@ export function threadTopic(key: string): string {
 	return `${THREAD_TOPIC_PREFIX}${encodeURIComponent(key)}`;
 }
 
-/** Whether a record is an S2 command: exactly one header, with an empty name. */
-function isCommandRecord(
+/** Whether a record is an S2 command rather than an event. */
+export function isControlRecord(
 	record: Pick<ReadRecord<"string">, "headers">,
 ): boolean {
 	const headers = record.headers ?? [];
 	return headers.length === 1 && headers[0]?.[0] === "";
 }
 
-/** Whether a record is lease state or an S2 command, rather than an event. */
-export function isControlRecord(
-	record: Pick<ReadRecord<"string">, "headers">,
-): boolean {
-	return isCommandRecord(record) || isLeaseRecord(record);
-}
-
-/** Whether the stream is missing or being deleted. */
-function isGone(error: unknown): boolean {
-	return (
-		error instanceof S2Error &&
-		(error.status === 404 || error.code === "stream_deletion_pending")
-	);
-}
-
-/** Parse record-backed lease state, treating invalid data as no lease. */
-function decodeLeaseRecord(body: string): LeaseState | undefined {
-	try {
-		const value: unknown = JSON.parse(body);
-		if (value === null || typeof value !== "object") return undefined;
-		const { owner, expiresAt, token } = value as Record<string, unknown>;
-		if (owner !== null && typeof owner !== "string") return undefined;
-		if (typeof expiresAt !== "number") return undefined;
-		if (typeof token !== "string") return undefined;
-		return { owner, expiresAt, token };
-	} catch {
-		return undefined;
-	}
-}
-
 /** The owner of an unexpired lease. */
 function holderOf(lease: LeaseState | undefined): string | undefined {
-	if (!lease?.owner || lease.expiresAt <= Date.now()) return undefined;
+	if (!lease || lease.expiresAt <= Date.now()) return undefined;
 	return lease.owner;
-}
-
-/** Encode lease state as a tagged compatibility record. */
-function leaseRecord(state: LeaseState): AppendRecord {
-	return AppendRecord.string({
-		body: JSON.stringify(state),
-		headers: [[LEASE_HEADER_NAME, "1"]],
-	});
 }
 
 /** Convert a canonical UUID to its compact 16-byte representation. */
@@ -161,20 +89,19 @@ function uuidFromBytes(bytes: Buffer): string {
  * encodes to exactly 36 bytes and fits a UUID (or a short UTF-8 owner), expiry,
  * format marker, and nonce.
  */
-function encodeInlineLease(
-	owner: string,
-	expiresAt: number,
-): LeaseState | undefined {
+function encodeLease(owner: string, expiresAt: number): LeaseState {
 	const compactUuid = uuidBytes(owner);
 	const utf8Owner = compactUuid ? undefined : Buffer.from(owner, "utf8");
 	const ownerBytes = compactUuid ?? utf8Owner;
 	if (
 		!ownerBytes ||
 		ownerBytes.length === 0 ||
-		ownerBytes.length > MAX_INLINE_OWNER_BYTES ||
+		ownerBytes.length > MAX_OWNER_BYTES ||
 		(!compactUuid && ownerBytes.toString("utf8") !== owner)
 	) {
-		return undefined;
+		throw new RangeError(
+			"lease owner must be a canonical lowercase UUID or at most 16 UTF-8 bytes",
+		);
 	}
 
 	const bytes = Buffer.alloc(TOKEN_OWNER_OFFSET + ownerBytes.length);
@@ -196,7 +123,7 @@ function encodeInlineLease(
 }
 
 /** Decode lease state embedded in a fencing token. */
-function decodeInlineLease(token: string): LeaseState | undefined {
+function decodeLease(token: string): LeaseState | undefined {
 	if (!token || token.length > 36) return undefined;
 	let bytes: Buffer;
 	try {
@@ -207,7 +134,7 @@ function decodeInlineLease(token: string): LeaseState | undefined {
 	if (
 		bytes.toString("base64url") !== token ||
 		bytes.length <= TOKEN_OWNER_OFFSET ||
-		bytes.length > MAX_INLINE_TOKEN_BYTES ||
+		bytes.length > MAX_TOKEN_BYTES ||
 		bytes[0] !== TOKEN_MAGIC
 	) {
 		return undefined;
@@ -217,14 +144,14 @@ function decodeInlineLease(token: string): LeaseState | undefined {
 	const ownerBytes = bytes.subarray(TOKEN_OWNER_OFFSET);
 	let owner: string;
 	if (kind === TOKEN_KIND_UUID) {
-		if (ownerBytes.length !== MAX_INLINE_OWNER_BYTES) return undefined;
+		if (ownerBytes.length !== MAX_OWNER_BYTES) return undefined;
 		owner = uuidFromBytes(ownerBytes);
 	} else if (kind === TOKEN_KIND_UTF8) {
 		owner = ownerBytes.toString("utf8");
 		if (
 			!owner ||
 			!Buffer.from(owner, "utf8").equals(ownerBytes) ||
-			ownerBytes.length > MAX_INLINE_OWNER_BYTES
+			ownerBytes.length > MAX_OWNER_BYTES
 		) {
 			return undefined;
 		}
@@ -239,82 +166,60 @@ function decodeInlineLease(token: string): LeaseState | undefined {
 	};
 }
 
-/** Build a token-only update when possible, otherwise a compatible record pair. */
-function leaseUpdate(owner: string, ttlMs: number): LeaseUpdate {
-	const expiresAt = Math.floor(Date.now() + ttlMs);
-	const inline = encodeInlineLease(owner, expiresAt);
-	if (inline) {
-		return {
-			records: [AppendRecord.fence(inline.token)],
-		};
+/** Build the single fencing command that installs a new lease. */
+function leaseUpdate(owner: string, ttlMs: number): readonly AppendRecord[] {
+	const expiresAt = Math.floor(Date.now() + Math.max(0, ttlMs));
+	if (!Number.isFinite(expiresAt) || expiresAt > MAX_EXPIRY) {
+		throw new RangeError("lease expiry exceeds the fencing-token format");
 	}
+	return [AppendRecord.fence(encodeLease(owner, expiresAt).token)];
+}
 
-	const lease = {
-		owner,
-		expiresAt,
-		token: `~${randomToken(16)}`,
-	} satisfies LeaseState;
-	return {
-		records: [AppendRecord.fence(lease.token), leaseRecord(lease)],
-	};
+/** Decode a token into the state it guards. Unknown formats are unowned. */
+function snapshot(token: string): LeaseSnapshot {
+	return { token, lease: decodeLease(token) };
 }
 
 /**
  * Distributed S2 leases stored in the thread stream they coordinate.
  *
- * For canonical UUIDs and owner IDs up to 16 UTF-8 bytes, the fencing token is
- * the complete lease register: owner, expiry, and a nonce. Conditional-append
- * failures return the current token, so acquisition and renewal do not read
- * event records or retain process-local state.
+ * The fencing token is the complete lease register: owner, expiry, and a nonce.
+ * Conditional-append failures return the current token, so lease operations do
+ * not read event records or retain process-local state.
  *
- * Longer custom owner IDs and tokens written by older versions use tagged
- * state records as a compatibility fallback. Event readers skip both those
- * records and S2 command records via {@link isControlRecord}.
+ * Owners must be canonical lowercase UUIDs or at most 16 UTF-8 bytes. There is
+ * deliberately no record-backed or legacy-token fallback.
  */
 export class S2LeaseProvider implements LeaseProvider {
-	/** Whether a clamped TTL has already been reported. */
-	private warnedAboutTtl = false;
-
 	constructor(
 		private readonly basin: S2Basin,
 		private readonly streamPrefix: string,
-		private readonly logger?: Logger,
 	) {}
-
-	/** Clamp a TTL to the supported maximum, reporting the first clamp. */
-	private ttl(ttlMs: number): number {
-		if (!Number.isFinite(ttlMs) || ttlMs < 0) return 0;
-		if (ttlMs <= MAX_LEASE_TTL_MS) return ttlMs;
-		if (!this.warnedAboutTtl) {
-			this.warnedAboutTtl = true;
-			const message = `[S2LeaseProvider] Clamping lease TTL ${ttlMs}ms to ${MAX_LEASE_TTL_MS}ms. Lower MASTRA_AGENT_THREAD_LEASE_TTL_MS to keep renewals ahead of expiry.`;
-			if (this.logger) this.logger.warn(message);
-			else console.warn(message);
-		}
-		return MAX_LEASE_TTL_MS;
-	}
 
 	async acquireLease(
 		key: string,
 		owner: string,
 		ttlMs: number,
 	): Promise<{ acquired: boolean; owner?: string }> {
-		const ttl = this.ttl(ttlMs);
+		const desired = leaseUpdate(owner, ttlMs);
 		// The S2 fencing token starts empty, so a free lease is one append.
-		const initial = await this.swap(key, "", leaseUpdate(owner, ttl).records);
+		const initial = await this.swap(key, "", desired);
 		if (initial.swapped) return { acquired: true, owner };
 
-		let current = await this.snapshotFromToken(key, initial.actualToken);
+		let current = snapshot(initial.actualToken);
 		for (let attempt = 0; attempt < CAS_ATTEMPTS; attempt++) {
 			const holder = holderOf(current.lease);
 			if (holder && holder !== owner) {
 				return { acquired: false, owner: holder };
 			}
 			// Empty, expired, or already ours: replace exactly what S2 returned.
-			const desired = leaseUpdate(owner, ttl);
-			const result = await this.swap(key, current.token, desired.records);
+			const result = await this.swap(
+				key,
+				current.token,
+				leaseUpdate(owner, ttlMs),
+			);
 			if (result.swapped) return { acquired: true, owner };
-			current = await this.snapshotFromToken(key, result.actualToken);
+			current = snapshot(result.actualToken);
 		}
 
 		// Name the winner after repeated CAS conflicts.
@@ -334,7 +239,7 @@ export class S2LeaseProvider implements LeaseProvider {
 				AppendRecord.fence(""),
 			]);
 			if (result.swapped) return;
-			current = await this.snapshotFromToken(key, result.actualToken);
+			current = snapshot(result.actualToken);
 		}
 	}
 
@@ -343,14 +248,16 @@ export class S2LeaseProvider implements LeaseProvider {
 		owner: string,
 		ttlMs: number,
 	): Promise<boolean> {
-		const ttl = this.ttl(ttlMs);
 		let current = await this.currentLease(key);
 		for (let attempt = 0; attempt < CAS_ATTEMPTS; attempt++) {
 			if (holderOf(current.lease) !== owner) return false;
-			const desired = leaseUpdate(owner, ttl);
-			const result = await this.swap(key, current.token, desired.records);
+			const result = await this.swap(
+				key,
+				current.token,
+				leaseUpdate(owner, ttlMs),
+			);
 			if (result.swapped) return true;
-			current = await this.snapshotFromToken(key, result.actualToken);
+			current = snapshot(result.actualToken);
 		}
 		return false;
 	}
@@ -361,14 +268,16 @@ export class S2LeaseProvider implements LeaseProvider {
 		toOwner: string,
 		ttlMs: number,
 	): Promise<boolean> {
-		const ttl = this.ttl(ttlMs);
 		let current = await this.currentLease(key);
 		for (let attempt = 0; attempt < CAS_ATTEMPTS; attempt++) {
 			if (holderOf(current.lease) !== fromOwner) return false;
-			const desired = leaseUpdate(toOwner, ttl);
-			const result = await this.swap(key, current.token, desired.records);
+			const result = await this.swap(
+				key,
+				current.token,
+				leaseUpdate(toOwner, ttlMs),
+			);
 			if (result.swapped) return true;
-			current = await this.snapshotFromToken(key, result.actualToken);
+			current = snapshot(result.actualToken);
 		}
 		return false;
 	}
@@ -393,88 +302,7 @@ export class S2LeaseProvider implements LeaseProvider {
 
 	/** Resolve the current lease, decoding the fencing token whenever possible. */
 	private async currentLease(key: string): Promise<LeaseSnapshot> {
-		return await this.snapshotFromToken(key, await this.observeToken(key));
-	}
-
-	/** Resolve one token, consulting records only for legacy/oversized formats. */
-	private async snapshotFromToken(
-		key: string,
-		token: string,
-	): Promise<LeaseSnapshot> {
-		if (!token) return { token };
-		const inline = decodeInlineLease(token);
-		if (inline) return { token, lease: inline };
-
-		const legacy = await this.readRecordBackedLease(key);
-		return {
-			token,
-			lease: legacy?.token === token ? legacy : undefined,
-		};
-	}
-
-	/** Locate legacy record-backed state within a fixed tail snapshot. */
-	private async readRecordBackedLease(
-		key: string,
-	): Promise<LeaseState | undefined> {
-		const stream = this.stream(key);
-		let targetTail: number;
-		try {
-			targetTail = (await stream.checkTail()).tail.seqNum;
-		} catch (error) {
-			if (isGone(error)) return undefined;
-			throw error;
-		}
-
-		const recentStart = Math.max(0, targetTail - LEGACY_TAIL_LOOKBACK_RECORDS);
-		const recent = await this.scanRecords(
-			key,
-			{ from: { seqNum: recentStart } },
-			targetTail,
-		);
-		if (recent || recentStart === 0) return recent;
-
-		return await this.scanRecords(
-			key,
-			{
-				from: { timestamp: Date.now() - LEGACY_LOOKBACK_MS },
-				clamp: true,
-			},
-			targetTail,
-		);
-	}
-
-	/** Scan a compatibility range up to, but never beyond, a captured tail. */
-	private async scanRecords(
-		key: string,
-		start: ReadStart,
-		targetTail: number,
-	): Promise<LeaseState | undefined> {
-		const stream = this.stream(key);
-		let lease: LeaseState | undefined;
-		let cursor: number | undefined;
-		try {
-			while (cursor === undefined || cursor < targetTail) {
-				const batch = await stream.read({
-					start: cursor === undefined ? start : { from: { seqNum: cursor } },
-				});
-				let advanced = false;
-				for (const record of batch.records) {
-					if (record.seqNum >= targetTail) break;
-					if (isLeaseRecord(record)) {
-						lease = decodeLeaseRecord(record.body);
-					}
-					cursor = record.seqNum + 1;
-					advanced = true;
-				}
-				if (!advanced) break;
-			}
-		} catch (error) {
-			if (isGone(error) || error instanceof RangeNotSatisfiableError) {
-				return lease;
-			}
-			throw error;
-		}
-		return lease;
+		return snapshot(await this.observeToken(key));
 	}
 
 	/** Atomically replace an exact fencing token, returning the winner on loss. */
@@ -495,9 +323,4 @@ export class S2LeaseProvider implements LeaseProvider {
 			throw error;
 		}
 	}
-}
-
-/** Whether a record holds compatibility lease state. */
-function isLeaseRecord(record: Pick<ReadRecord<"string">, "headers">): boolean {
-	return (record.headers ?? []).some(([name]) => name === LEASE_HEADER_NAME);
 }

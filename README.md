@@ -115,13 +115,13 @@ Persisted-topic consumer groups are rejected because this adapter implements bro
 
 `getLeaseProvider()` returns an `S2LeaseProvider`, which Mastra's signals runtime uses to elect a single owner per thread key across processes. A lease key identifies both a thread and its topic, so lease state lives **in that thread's own stream**: one stream per thread carries its events and its coordination state.
 
-- **Token-encoded state.** For canonical UUIDs and owner IDs up to 16 UTF-8 bytes, the S2 fencing token itself contains the owner, expiry, and a nonce. Acquiring, renewing, transferring, and checking these leases never scan event records or retain an in-process cursor. Longer custom owner IDs and tokens written by older versions transparently use a bounded tagged-record fallback.
+- **Token-only state.** The S2 fencing token itself contains the owner, expiry, and a nonce. Lease operations never scan event records or retain an in-process cursor. Owners must be canonical lowercase UUIDs (Mastra's generated run IDs use this form) or at most 16 UTF-8 bytes. Other owner formats are rejected; there is no record-backed or legacy-token fallback.
 - **Atomic ownership.** Every mutation conditionally replaces the exact fencing token S2 reports. Two contenders can race, but only one replacement succeeds; a transfer has no unowned window, and a takeover fences off the previous owner. Ordinary event appends do not enforce the lease token, so event traffic never conflicts with coordination.
 - **Lookup without replay.** A failed fencing-token condition returns S2's current token. The provider decodes that response directly instead of reading the thread history. Token-only acquisition therefore takes one append when free and one failed condition plus one append when replacing an expired lease.
-- **Records.** Fence commands and compatibility lease records are filtered out client side, but still consume sequence numbers — resume from `last.index + 1`, not from `events.length`.
-- **TTL and clocks.** TTLs above `MAX_LEASE_TTL_MS` (60s) are clamped with a warning. Mastra's default is 15s; if you raise `MASTRA_AGENT_THREAD_LEASE_TTL_MS` past a minute, lower it again so renewals stay ahead of expiry. Expiry uses wall-clock time, so keep clocks synchronized and TTLs well above expected skew.
+- **Records.** Fence commands are filtered out client side, but still consume sequence numbers — resume from `last.index + 1`, not from `events.length`.
+- **TTL and clocks.** Expiry uses wall-clock time, so keep clocks synchronized and TTLs well above expected skew.
 - **No local state.** Any process can acquire, renew, transfer, or release a lease after a restart because S2's current fencing token is authoritative.
-- **No trimming** while a lease is held. Inline leases need one small fence record per renewal; compatibility leases also append a tagged state record. `clearTopic` deletes the stream, so avoid it on an active thread topic.
+- **No trimming** while a lease is held. Leases append one small fence record per renewal. `clearTopic` deletes the stream, so avoid it on an active thread topic.
 
 The effective replay window is the shorter of S2 retention and Mastra's durable-agent cleanup window. Mastra clears a terminal run's topic after `cleanupTimeoutMs` (30 seconds by default); set it to `0` to retain the S2 stream until explicit cleanup or S2 retention removes it. A request for history that has already been trimmed fails instead of silently returning a partial transcript.
 

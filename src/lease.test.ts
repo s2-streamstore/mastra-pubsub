@@ -1,20 +1,13 @@
 import type {
 	AppendAck,
 	AppendInput,
-	ReadBatch,
-	ReadInput,
 	ReadRecord,
 	S2Basin,
 } from "@s2-dev/streamstore";
 import { FencingTokenMismatchError } from "@s2-dev/streamstore";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import {
-	isControlRecord,
-	MAX_LEASE_TTL_MS,
-	S2LeaseProvider,
-	threadTopic,
-} from "./lease.js";
+import { isControlRecord, S2LeaseProvider, threadTopic } from "./lease.js";
 
 type Headers = ReadonlyArray<readonly [string, string]>;
 
@@ -25,12 +18,11 @@ const streamNameFor = (key: string) => `mastra/durable/${threadTopic(key)}`;
 class FakeStream {
 	readonly records: Array<ReadRecord<"string">> = [];
 	fence = "";
-	readCount = 0;
 	casConflicts = 0;
-	/** Records returned per read, to exercise multi-batch scans. */
-	batchLimit = 1_000;
 	/** Runs once at the start of the next append (to simulate a racing writer). */
 	beforeAppendOnce?: () => void;
+	/** Runs after the next mismatch has captured the old token. */
+	afterMismatchOnce?: () => void;
 
 	push(body: string, headers: Headers = [], timestamp = new Date()): void {
 		this.records.push({
@@ -50,9 +42,13 @@ class FakeStream {
 		hook?.();
 		if (input.fencingToken !== undefined && input.fencingToken !== this.fence) {
 			this.casConflicts++;
+			const actual = this.fence;
+			const afterMismatch = this.afterMismatchOnce;
+			this.afterMismatchOnce = undefined;
+			afterMismatch?.();
 			throw new FencingTokenMismatchError({
 				message: "fencing token mismatch",
-				expectedFencingToken: this.fence,
+				expectedFencingToken: actual,
 			});
 		}
 		const start = this.records.length;
@@ -70,41 +66,6 @@ class FakeStream {
 			end: position,
 			tail: position,
 		};
-	}
-
-	async checkTail(): Promise<{
-		tail: { seqNum: number; timestamp: Date };
-	}> {
-		return {
-			tail: { seqNum: this.records.length, timestamp: new Date() },
-		};
-	}
-
-	async read(input?: ReadInput): Promise<ReadBatch<"string">> {
-		this.readCount++;
-		const start = this.startPosition(input);
-		return {
-			records: this.records.slice(start, start + this.batchLimit),
-			tail: { seqNum: this.records.length, timestamp: new Date() },
-		};
-	}
-
-	private startPosition(input?: ReadInput): number {
-		const from = input?.start?.from;
-		if (!from) return 0;
-		if ("seqNum" in from) return from.seqNum;
-		if ("tailOffset" in from) {
-			return Math.max(0, this.records.length - from.tailOffset);
-		}
-		// Records are timestamp-ordered, so start at the first one in the window.
-		const since =
-			from.timestamp instanceof Date
-				? from.timestamp.getTime()
-				: from.timestamp;
-		const index = this.records.findIndex(
-			(record) => record.timestamp.getTime() >= since,
-		);
-		return index === -1 ? this.records.length : index;
 	}
 }
 
@@ -132,7 +93,7 @@ function setup() {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** An appended Mastra event, which lease reads must scan past. */
+/** An appended Mastra event sharing the lease stream. */
 const pushEvent = (stream: FakeStream, i: number) =>
 	stream.push(JSON.stringify({ id: `e${i}`, type: "chunk" }));
 
@@ -144,10 +105,9 @@ describe("S2LeaseProvider", () => {
 			owner: "a",
 		});
 		expect(await a.getLeaseOwner("k")).toBe("a");
-		// Inline owners need one fence record and no lease-state read.
+		// Token-only leases need one fence record; the fake exposes no read API.
 		expect(stream("k").records).toHaveLength(1);
 		expect(stream("k").fence).not.toBe("");
-		expect(stream("k").readCount).toBe(0);
 	});
 
 	it("round-trips a UUID owner entirely through the fencing token", async () => {
@@ -160,7 +120,6 @@ describe("S2LeaseProvider", () => {
 		});
 		expect(stream("k").fence).toHaveLength(36);
 		expect(await provider().getLeaseOwner("k")).toBe(owner);
-		expect(stream("k").readCount).toBe(0);
 	});
 
 	it("acquires against a hot event tail without reading or matching its position", async () => {
@@ -171,12 +130,11 @@ describe("S2LeaseProvider", () => {
 			acquired: true,
 			owner: "a",
 		});
-		expect(stream("k").readCount).toBe(0);
 		expect(stream("k").records).toHaveLength(1_001);
 	});
 
 	it("admits exactly one of two concurrent acquirers", async () => {
-		const { provider, stream } = setup();
+		const { provider } = setup();
 		const [first, second] = await Promise.all([
 			provider().acquireLease("k", "a", 60_000),
 			provider().acquireLease("k", "b", 60_000),
@@ -185,25 +143,16 @@ describe("S2LeaseProvider", () => {
 		expect([first.acquired, second.acquired].filter(Boolean)).toHaveLength(1);
 		const winner = first.acquired ? "a" : "b";
 		expect(first.acquired ? second.owner : first.owner).toBe(winner);
-		expect(stream("k").readCount).toBe(0);
 	});
 
-	it("falls back to a tagged record for a long custom owner", async () => {
-		const { a, stream, provider } = setup();
+	it("rejects an owner that cannot fit in the token", async () => {
+		const { a, stream } = setup();
 		const owner = "custom-owner-id-longer-than-sixteen-bytes";
 
-		expect(await a.acquireLease("k", owner, 60_000)).toEqual({
-			acquired: true,
-			owner,
-		});
-		expect(stream("k").records).toHaveLength(2);
-		expect(
-			stream("k").records.some((record) =>
-				(record.headers ?? []).some(([name]) => name === "mastra-lease"),
-			),
-		).toBe(true);
-		expect(await provider().getLeaseOwner("k")).toBe(owner);
-		expect(stream("k").readCount).toBeGreaterThan(0);
+		await expect(a.acquireLease("k", owner, 60_000)).rejects.toThrow(
+			"lease owner must be a canonical lowercase UUID or at most 16 UTF-8 bytes",
+		);
+		expect(stream("k").records).toHaveLength(0);
 	});
 
 	it("stores lease state in the thread stream for the key", async () => {
@@ -260,11 +209,10 @@ describe("S2LeaseProvider", () => {
 		// Renewal atomically rotates the self-contained token.
 		expect(stream("k").records).toHaveLength(2);
 		expect(stream("k").fence).not.toBe(fence);
-		expect(stream("k").readCount).toBe(0);
 	});
 
 	it("renews, transfers, and releases from a different process", async () => {
-		const { a, stream, provider } = setup();
+		const { a, provider } = setup();
 		await a.acquireLease("k", "a", 60_000);
 		// The stream is the only state, so a process that wrote none of it can
 		// still drive the lease it owns.
@@ -273,27 +221,21 @@ describe("S2LeaseProvider", () => {
 		expect(await other.transferLease("k", "a", "b", 60_000)).toBe(true);
 		await other.releaseLease("k", "b");
 		expect(await a.getLeaseOwner("k")).toBeUndefined();
-		expect(stream("k").readCount).toBe(0);
 	});
 
-	it("fails a renewal fenced off between its read and its append", async () => {
-		const { a, stream } = setup();
+	it("fails a renewal fenced off after observing the token", async () => {
+		const { a, stream, provider } = setup();
 		await a.acquireLease("k", "a", 60_000);
-		// Another process recovers the thread and fences `a` off mid-renewal.
-		stream("k").beforeAppendOnce = () => {
-			stream("k").push("stolen-token", [["", "fence"]]);
-			stream("k").push(
-				JSON.stringify({
-					owner: "b",
-					expiresAt: Date.now() + 60_000,
-					token: "stolen-token",
-				}),
-				[["mastra-lease", "1"]],
-			);
+		await provider().acquireLease("stolen", "b", 60_000);
+		const stolenToken = stream("stolen").fence;
+		// The probe returns `a`'s token, then another process installs `b`'s
+		// token before the renewal compare-and-swap.
+		stream("k").afterMismatchOnce = () => {
+			stream("k").push(stolenToken, [["", "fence"]]);
 		};
 
 		expect(await a.renewLease("k", "a", 60_000)).toBe(false);
-		expect(stream("k").casConflicts).toBe(1);
+		expect(stream("k").casConflicts).toBe(2);
 		expect(await a.getLeaseOwner("k")).toBe("b");
 	});
 
@@ -318,10 +260,9 @@ describe("S2LeaseProvider", () => {
 		expect(await a.transferLease("k", "a", "c", 1_000)).toBe(false);
 	});
 
-	it("does not scan interleaved events for an inline lease", async () => {
+	it("does not scan interleaved events for a lease", async () => {
 		const { a, stream, provider } = setup();
 		await a.acquireLease("k", "a", 60_000);
-		stream("k").batchLimit = 2;
 		for (let i = 0; i < 10; i++) pushEvent(stream("k"), i);
 
 		expect(await provider().getLeaseOwner("k")).toBe("a");
@@ -329,7 +270,6 @@ describe("S2LeaseProvider", () => {
 			acquired: false,
 			owner: "a",
 		});
-		expect(stream("k").readCount).toBe(0);
 	});
 
 	it("keeps token lookup constant-time when events bury the lease", async () => {
@@ -338,44 +278,16 @@ describe("S2LeaseProvider", () => {
 		for (let i = 0; i < 600; i++) pushEvent(stream("k"), i);
 
 		expect(await provider().getLeaseOwner("k")).toBe("a");
-		expect(stream("k").readCount).toBe(0);
-	});
-
-	it("ignores legacy lease state older than the fallback window", async () => {
-		const { a, stream } = setup();
-		// An unexpired lease is always written within its TTL, so a record this
-		// old cannot be an active lease whatever its `expiresAt` claims.
-		stream("k").push(
-			"stale-token",
-			[["", "fence"]],
-			new Date(Date.now() - 10 * 60_000),
-		);
-		stream("k").push(
-			JSON.stringify({
-				owner: "stale",
-				expiresAt: Date.now() + 60_000,
-				token: "stale-token",
-			}),
-			[["mastra-lease", "1"]],
-			new Date(Date.now() - 10 * 60_000),
-		);
-		// Bury it past the bounded tail scan so the time window decides.
-		for (let i = 0; i < 600; i++) pushEvent(stream("k"), i);
-
-		expect(await a.getLeaseOwner("k")).toBeUndefined();
-		expect((await a.acquireLease("k", "a", 1_000)).acquired).toBe(true);
 	});
 
 	it("retries a lost CAS race and re-evaluates the new state", async () => {
-		const { a, stream } = setup();
-		// A racing writer takes and releases the lease right before our append
-		// lands, making our condition stale. The retry re-reads and still acquires.
+		const { a, stream, provider } = setup();
+		await provider().acquireLease("expired", "other", 0);
+		const expiredToken = stream("expired").fence;
+		// A racing writer installs an already-expired token before our initial
+		// append. The mismatch returns it and the retry replaces it.
 		stream("k").beforeAppendOnce = () => {
-			stream("k").push("other-token", [["", "fence"]]);
-			stream("k").push(
-				JSON.stringify({ owner: null, expiresAt: 0, token: "other-token" }),
-				[["mastra-lease", "1"]],
-			);
+			stream("k").push(expiredToken, [["", "fence"]]);
 		};
 		expect(await a.acquireLease("k", "a", 1_000)).toEqual({
 			acquired: true,
@@ -385,17 +297,11 @@ describe("S2LeaseProvider", () => {
 	});
 
 	it("loses to a racing writer who took the lease", async () => {
-		const { a, stream } = setup();
+		const { a, stream, provider } = setup();
+		await provider().acquireLease("winner", "b", 60_000);
+		const winnerToken = stream("winner").fence;
 		stream("k").beforeAppendOnce = () => {
-			stream("k").push("winner-token", [["", "fence"]]);
-			stream("k").push(
-				JSON.stringify({
-					owner: "b",
-					expiresAt: Date.now() + 60_000,
-					token: "winner-token",
-				}),
-				[["mastra-lease", "1"]],
-			);
+			stream("k").push(winnerToken, [["", "fence"]]);
 		};
 		expect(await a.acquireLease("k", "a", 1_000)).toEqual({
 			acquired: false,
@@ -403,60 +309,38 @@ describe("S2LeaseProvider", () => {
 		});
 	});
 
-	it("ignores malformed lease records instead of trusting them", async () => {
+	it("replaces an unrecognized token without reading records", async () => {
 		const { a, stream } = setup();
 		stream("k").push("malformed-token", [["", "fence"]]);
-		stream("k").push("not-json", [["mastra-lease", "1"]]);
 		expect(await a.getLeaseOwner("k")).toBeUndefined();
 		expect((await a.acquireLease("k", "a", 1_000)).acquired).toBe(true);
+		expect(stream("k").fence).not.toBe("malformed-token");
 	});
 
-	it("clamps a TTL longer than the lookback window, warning once", async () => {
-		const { basin, stream } = setup();
-		const warn = vi.fn();
-		const logger = { warn } as unknown as ConstructorParameters<
-			typeof S2LeaseProvider
-		>[2];
-		const p = new S2LeaseProvider(
-			basin as unknown as S2Basin,
-			"mastra/durable/",
-			logger,
-		);
-
-		const before = Date.now();
-		const owner = "owner-longer-than-sixteen-bytes";
-		await p.acquireLease("k", owner, 10 * 60_000);
-		const state = JSON.parse(
-			stream("k").records.find((r) =>
-				(r.headers ?? []).some(([h]) => h === "mastra-lease"),
-			)?.body as string,
-		) as { expiresAt: number };
-		// Expiry reflects the clamp, not the requested ten minutes.
-		expect(state.expiresAt - before).toBeLessThanOrEqual(MAX_LEASE_TTL_MS + 50);
-
-		// Repeat offences stay quiet so renewals cannot flood the log.
-		await p.renewLease("k", owner, 10 * 60_000);
-		expect(warn).toHaveBeenCalledTimes(1);
-		expect(warn.mock.calls[0]?.[0]).toContain("Clamping lease TTL");
+	it("supports TTLs longer than the old record-scan window", async () => {
+		const { a } = setup();
+		expect(await a.acquireLease("k", "a", 10 * 60_000)).toEqual({
+			acquired: true,
+			owner: "a",
+		});
+		expect(await a.getLeaseOwner("k")).toBe("a");
 	});
 
-	it("keeps an inline lease readable behind an arbitrarily hot tail", async () => {
+	it("keeps a lease readable behind an arbitrarily hot tail", async () => {
 		const { a, stream, provider } = setup();
-		await a.acquireLease("k", "a", MAX_LEASE_TTL_MS);
+		await a.acquireLease("k", "a", 60_000);
 		for (let i = 0; i < 600; i++) pushEvent(stream("k"), i);
 		expect(await provider().getLeaseOwner("k")).toBe("a");
 		expect(await provider().acquireLease("k", "b", 1_000)).toEqual({
 			acquired: false,
 			owner: "a",
 		});
-		expect(stream("k").readCount).toBe(0);
 	});
 
 	it("treats a multi-header record as an event, not a command", () => {
 		// Command records carry exactly one header with an empty name; a producer
 		// using an empty header name alongside others is still publishing an event.
 		expect(isControlRecord({ headers: [["", "fence"]] })).toBe(true);
-		expect(isControlRecord({ headers: [["mastra-lease", "1"]] })).toBe(true);
 		expect(
 			isControlRecord({
 				headers: [

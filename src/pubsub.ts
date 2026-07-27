@@ -315,11 +315,7 @@ export class S2PubSub extends CachingPubSub {
 	/** Return the S2-backed lease provider. */
 	getLeaseProvider(): LeaseProvider {
 		// Leases live in the thread streams they coordinate, under this prefix.
-		this.leaseProvider ??= new S2LeaseProvider(
-			this.basin,
-			this.streamPrefix,
-			this.s2Logger,
-		);
+		this.leaseProvider ??= new S2LeaseProvider(this.basin, this.streamPrefix);
 		return this.leaseProvider;
 	}
 
@@ -446,7 +442,7 @@ export class S2PubSub extends CachingPubSub {
 					throw new S2ReplayGapError(topic, cursor, record.seqNum);
 				}
 				cursor = record.seqNum + 1;
-				// Lease and command records share the stream; they are not events.
+				// S2 command records share the stream; they are not events.
 				if (isControlRecord(record)) continue;
 				events.push(eventFromRecord(record, topic));
 			}
@@ -599,7 +595,7 @@ export class S2PubSub extends CachingPubSub {
 						}
 						state.nextSeqNum = record.seqNum + 1;
 						reconnectAttempt = 0;
-						// Lease and command records share the stream; they are not events.
+						// S2 command records share the stream; they are not events.
 						if (!isControlRecord(record)) {
 							this.invokeSubscriber(
 								state,
