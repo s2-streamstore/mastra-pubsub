@@ -182,7 +182,7 @@ describeIf("S2PubSub Integration", () => {
 		const history = await ps.getHistory(t, 0);
 		expect(history.map((e) => (e.data as { i: number }).i)).toEqual([0, 1]);
 		// Events keep their raw sequence numbers; lease records consume the rest.
-		expect(history.map((e) => e.index)).toEqual([0, 3]);
+		expect(history.map((e) => e.index)).toEqual([0, 2]);
 		expect(await observer.getLeaseProvider().getLeaseOwner(key)).toBe("run-1");
 		await lease.releaseLease(key, "run-1");
 	});
