@@ -4,9 +4,8 @@
  * Mastra). Here the resumable-stream backend is S2 instead of Redis.
  */
 import { Agent } from "@mastra/core/agent";
-import { createDurableAgent } from "@mastra/core/agent/durable";
+import { DurableAgent } from "@mastra/core/agent/durable";
 import { createTool } from "@mastra/core/tools";
-import { Memory } from "@mastra/memory";
 import { z } from "zod";
 
 // Simple web search tool (simulated for demo purposes).
@@ -28,7 +27,7 @@ const webSearchTool = createTool({
 	execute: async (inputData: { query: string }) => {
 		const { query } = inputData;
 		console.log(`[web-search] Searching for: ${query}`);
-		await new Promise((resolve) => setTimeout(resolve, 500));
+		await new Promise((resolve) => setTimeout(resolve, 1_500));
 		return {
 			results: [
 				{
@@ -61,14 +60,15 @@ Be thorough but concise. Cite your sources when presenting findings.`,
 	},
 };
 
-// Plain durable agent: resumable streams only, cache/pubsub inherited from Mastra.
-// Memory (storage inherited from Mastra) saves conversations as threads so the
-// playground can reload a thread and reattach to an in-flight run.
-export const durableResearchAgent = createDurableAgent({
+// Plain durable agent: resumable streams only, with storage and pubsub inherited
+// from the Mastra instance that registers it.
+export const durableResearchAgent = new DurableAgent({
 	agent: new Agent({
 		id: "durable-research-agent",
 		name: "Research Agent (Durable)",
-		memory: new Memory(),
 		...baseAgentConfig,
 	}),
+	// Keep a finished run replayable for ten minutes, then let Mastra clear its
+	// registry entry and S2 topic. Tune this together with S2 retention.
+	cleanupTimeoutMs: 10 * 60 * 1_000,
 });

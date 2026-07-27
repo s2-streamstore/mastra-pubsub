@@ -4,6 +4,9 @@
   "description": "Durable Mastra PubSub backed by S2 streams for Durable Agents",
   "license": "MIT",
   "type": "module",
+  "workspaces": [
+    "examples/durable-agents"
+  ],
   "homepage": "https://s2.dev",
   "repository": {
     "type": "git",
@@ -45,10 +48,11 @@
   "devDependencies": {
     "@biomejs/biome": "2.2.5",
     "@changesets/cli": "^2.29.7",
-    "@mastra/core": "1.50.2-alpha.0",
+    "@mastra/core": "1.51.0",
     "@types/node": "^24.9.2",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.10"
+    "vitest": "^4.0.10",
+    "zod": "3.25.76"
   },
   "engines": {
     "node": ">=22.13.0"

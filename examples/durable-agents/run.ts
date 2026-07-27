@@ -39,6 +39,12 @@ async function main() {
 	const live = await drain(started.output.fullStream);
 	w(`\n\nrunId: ${started.runId}\n`);
 	w(`live: ${live.count} chunks, ${live.text.length} chars\n\n`);
+	// Without this the replay comparison below passes vacuously: two empty
+	// transcripts are equal, so a failed model call would look like success.
+	if (!live.text) {
+		w("The live run produced no text, so there is nothing to replay.\n");
+		process.exit(1);
+	}
 
 	const REFRESHES = 3;
 	w(`== 2. ${REFRESHES} reconnects (client refreshes, replayed from S2) ==\n`);
