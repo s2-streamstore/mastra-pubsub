@@ -11,8 +11,13 @@ import type {
 	S2RequestOptions,
 	StreamPosition,
 } from "@s2-dev/streamstore";
+import {
+	FencingTokenMismatchError,
+	SeqNumMismatchError,
+} from "@s2-dev/streamstore";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { threadTopic } from "./lease.js";
 import { S2PubSub, type S2PubSubOptions } from "./pubsub.js";
 
 interface FakeSession {
@@ -29,6 +34,8 @@ class FakeStream {
 	sessionCount = 0;
 	trimPoint = 0;
 	appendError?: Error;
+	/** Current fencing token, set by `fence` command records. */
+	fence = "";
 
 	async checkTail(
 		options?: S2RequestOptions,
@@ -40,18 +47,39 @@ class FakeStream {
 
 	async append(input: AppendInput): Promise<AppendAck> {
 		if (this.appendError) throw this.appendError;
+		if (
+			input.matchSeqNum !== undefined &&
+			input.matchSeqNum !== this.records.length
+		) {
+			throw new SeqNumMismatchError({
+				message: "seqNum mismatch",
+				expectedSeqNum: this.records.length,
+			});
+		}
+		if (input.fencingToken !== undefined && input.fencingToken !== this.fence) {
+			throw new FencingTokenMismatchError({
+				message: "fencing token mismatch",
+				expectedFencingToken: this.fence,
+			});
+		}
 		const start = this.records.length;
 		for (const appendRecord of input.records) {
 			if (typeof appendRecord.body !== "string") {
 				throw new Error("FakeStream only supports string records");
 			}
+			const headers = (appendRecord.headers ?? []).map(
+				(header) => [String(header[0]), String(header[1])] as const,
+			);
 			const record: ReadRecord<"string"> = {
 				seqNum: this.records.length,
 				body: appendRecord.body,
-				headers: [],
+				headers,
 				timestamp: new Date(),
 			};
 			this.records.push(record);
+			if (headers.length === 1 && headers[0]?.[0] === "") {
+				this.fence = appendRecord.body;
+			}
 			for (const session of [...this.sessions]) {
 				if (!session.closed && record.seqNum >= session.cursor) {
 					session.cursor = record.seqNum + 1;
@@ -156,7 +184,15 @@ class FakeStream {
 		if ("tailOffset" in from) {
 			return Math.max(0, this.records.length - from.tailOffset);
 		}
-		return 0;
+		// Records are timestamp-ordered, so start at the first one in the window.
+		const since =
+			from.timestamp instanceof Date
+				? from.timestamp.getTime()
+				: from.timestamp;
+		const index = this.records.findIndex(
+			(record) => record.timestamp.getTime() >= since,
+		);
+		return index === -1 ? this.records.length : index;
 	}
 
 	private position(seqNum: number): StreamPosition {
@@ -420,6 +456,55 @@ describe("S2PubSub read-session live delivery", () => {
 			"[S2PubSub] Failed to clear topic agent.stream.run-1",
 			expect.objectContaining({ message: "delete failed" }),
 		);
+	});
+
+	it("shares one stream between a thread's events and its lease", async () => {
+		const basin = new FakeBasin();
+		const pubsub = createPubSub(basin);
+		const lease = pubsub.getLeaseProvider();
+		const key = "resource-1 thread-1";
+		const topic = threadTopic(key);
+		const received: Event[] = [];
+		const cb: EventCallback = (value) => received.push(value);
+
+		expect((await lease.acquireLease(key, "run-1", 60_000)).acquired).toBe(
+			true,
+		);
+		await pubsub.subscribe(topic, cb);
+		await pubsub.publish(topic, event(0));
+		expect(await lease.renewLease(key, "run-1", 60_000)).toBe(true);
+		await pubsub.publish(topic, event(1));
+		await waitFor(() => received.length === 2);
+
+		// fence + lease state + event + renewed lease state + event.
+		const stream = basin.stream(`mastra/durable/${topic}`);
+		expect(stream.records).toHaveLength(5);
+		// Subscribers and history see only the events, indexed by raw seqNum.
+		expect(received.map((e) => e.index)).toEqual([2, 4]);
+		expect((await pubsub.getHistory(topic, 0)).map((e) => e.index)).toEqual([
+			2, 4,
+		]);
+		expect(await lease.getLeaseOwner(key)).toBe("run-1");
+		await pubsub.unsubscribe(topic, cb);
+	});
+
+	it("replays from an offset across filtered control records", async () => {
+		const basin = new FakeBasin();
+		const pubsub = createPubSub(basin);
+		const lease = pubsub.getLeaseProvider();
+		const key = "resource-1 thread-2";
+		const topic = threadTopic(key);
+		const indexes: number[] = [];
+		const cb: EventCallback = (value) => indexes.push(value.index ?? -1);
+
+		await pubsub.publish(topic, event(0));
+		await lease.acquireLease(key, "run-1", 60_000);
+		await pubsub.publish(topic, event(1));
+
+		await pubsub.subscribeFromOffset(topic, 0, cb);
+		await waitFor(() => indexes.length === 2);
+		expect(indexes).toEqual([0, 3]);
+		await pubsub.unsubscribe(topic, cb);
 	});
 
 	it("rejects consumer groups for S2-backed topics", async () => {

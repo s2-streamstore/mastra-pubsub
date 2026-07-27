@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import EventEmitter from "node:events";
 import { MastraServerCache } from "@mastra/core/cache";
 import type {
 	CachingPubSubOptions,
@@ -27,7 +28,7 @@ import {
 	S2,
 	S2Error,
 } from "@s2-dev/streamstore";
-import { S2LeaseProvider } from "./lease.js";
+import { isControlRecord, S2LeaseProvider } from "./lease.js";
 
 export interface S2PubSubConfig {
 	/** An S2 client (takes precedence over `accessToken`). */
@@ -47,7 +48,10 @@ export interface S2PubSubOptions {
 	readonly inner?: PubSub;
 	/** S2 stream-name prefix. Defaults to `mastra/durable/`. */
 	readonly streamPrefix?: string;
-	/** Only topics with this prefix use S2. Defaults to `agent.stream.`. */
+	/**
+	 * Only topics with this prefix use S2. Defaults to `agent.`, covering
+	 * per-run streams and the per-thread streams that also hold lease state.
+	 */
 	readonly topicPrefix?: string;
 	/** Error logger. Defaults to `console.error`. */
 	readonly logger?: Logger;
@@ -222,6 +226,20 @@ class UnusedServerCache extends MastraServerCache {
 	}
 }
 
+/**
+ * Emitter for the default local transport, without a listener ceiling.
+ *
+ * Every subscription registers one local listener (see `subscribeAt`) and drops
+ * it on unsubscribe, so the count tracks concurrent subscribers per topic —
+ * routinely past Node's default of ten when several clients observe one run.
+ * That is fan-out, not a leak, and the warning it produces is noise.
+ */
+function localEmitter(): EventEmitter {
+	const emitter = new EventEmitter();
+	emitter.setMaxListeners(0);
+	return emitter;
+}
+
 /** Resolve the configured S2 client. */
 function resolveS2Client(config: S2PubSubConfig): S2 {
 	if (!config.basin) {
@@ -257,13 +275,15 @@ export class S2PubSub extends CachingPubSub {
 		// Handles non-durable and local-only events.
 		const local =
 			options.inner ??
-			new EventEmitterPubSub(undefined, { logger: options.logger });
+			new EventEmitterPubSub(localEmitter(), {
+				logger: options.logger,
+			});
 		// S2 is the replay store, so the inherited cache is unused.
 		super(local, new UnusedServerCache(), { logger: options.logger });
 		this.basin = s2.basin(config.basin);
 		this.local = local;
 		this.streamPrefix = options.streamPrefix ?? "mastra/durable/";
-		this.topicPrefix = options.topicPrefix ?? "agent.stream.";
+		this.topicPrefix = options.topicPrefix ?? "agent.";
 		this.s2Logger = options.logger;
 	}
 
@@ -273,9 +293,11 @@ export class S2PubSub extends CachingPubSub {
 
 	/** Return the S2-backed lease provider. */
 	getLeaseProvider(): LeaseProvider {
+		// Leases live in the thread streams they coordinate, under this prefix.
 		this.leaseProvider ??= new S2LeaseProvider(
 			this.basin,
-			`${this.streamPrefix}lease/`,
+			this.streamPrefix,
+			this.s2Logger,
 		);
 		return this.leaseProvider;
 	}
@@ -359,7 +381,12 @@ export class S2PubSub extends CachingPubSub {
 		await this.stopSubscription(topic, callback);
 	}
 
-	/** Read retained events from an offset. */
+	/**
+	 * Read retained events from an offset.
+	 *
+	 * Offsets are S2 sequence numbers, and the filtered-out lease and command
+	 * records consume them too. Resume from `last.index + 1`, not the count.
+	 */
 	async getHistory(topic: string, offset: number = 0): Promise<Event[]> {
 		if (!this.shouldPersist(topic)) {
 			return this.local.getHistory(topic, offset);
@@ -397,8 +424,10 @@ export class S2PubSub extends CachingPubSub {
 				if (record.seqNum > cursor) {
 					throw new S2ReplayGapError(topic, cursor, record.seqNum);
 				}
-				events.push(eventFromRecord(record, topic));
 				cursor = record.seqNum + 1;
+				// Lease and command records share the stream; they are not events.
+				if (isControlRecord(record)) continue;
+				events.push(eventFromRecord(record, topic));
 			}
 			if (batch.tail && cursor >= batch.tail.seqNum) break;
 		}
@@ -547,10 +576,15 @@ export class S2PubSub extends CachingPubSub {
 								);
 							}
 						}
-						const event = eventFromRecord(record, state.topic);
 						state.nextSeqNum = record.seqNum + 1;
 						reconnectAttempt = 0;
-						this.invokeSubscriber(state, event);
+						// Lease and command records share the stream; they are not events.
+						if (!isControlRecord(record)) {
+							this.invokeSubscriber(
+								state,
+								eventFromRecord(record, state.topic),
+							);
+						}
 						this.settleReady(state);
 					}
 				} catch (error) {

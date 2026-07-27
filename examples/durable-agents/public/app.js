@@ -1,37 +1,53 @@
-const storageKey = "s2-mastra-durable-run";
+/**
+ * Each conversation lives at its own URL (`/chat/<runId>`), so a refresh, a new
+ * tab, or a shared link all replay the same run from S2. The id goes in the path
+ * rather than localStorage, matching how Mastra Studio addresses a chat.
+ */
 const form = document.querySelector("#prompt-form");
 const promptInput = document.querySelector("#prompt");
 const messages = document.querySelector("#messages");
 const conversation = document.querySelector("#conversation");
 const emptyState = document.querySelector("#empty-state");
+const userTurn = document.querySelector("#user-turn");
 const userMessage = document.querySelector("#user-message");
+const sharedNote = document.querySelector("#shared-note");
 const transcript = document.querySelector("#transcript");
 const typing = document.querySelector("#typing");
 const status = document.querySelector("#status");
 const sendButton = document.querySelector("#send");
 const newChatButton = document.querySelector("#new-chat");
+const copyLinkButton = document.querySelector("#copy-link");
 
 let activeRequest;
-let currentPrompt = "";
 
-function readSession() {
-	try {
-		const value = JSON.parse(localStorage.getItem(storageKey) ?? "null");
-		return typeof value?.runId === "string" && typeof value?.prompt === "string"
-			? value
-			: undefined;
-	} catch {
-		return undefined;
+/** The run this page is showing, taken from `/chat/<runId>`. */
+function runIdFromPath() {
+	const match = /^\/chat\/([^/]+)$/.exec(window.location.pathname);
+	return match ? decodeURIComponent(match[1]) : undefined;
+}
+
+/** Point the address bar at this run without reloading. */
+function showRunInUrl(runId) {
+	const path = `/chat/${encodeURIComponent(runId)}`;
+	if (window.location.pathname !== path) {
+		window.history.replaceState({}, "", path);
 	}
+	copyLinkButton.hidden = false;
+	copyLinkButton.textContent = "Copy link";
 }
 
-function saveSession(runId) {
-	localStorage.setItem(storageKey, JSON.stringify({ runId, prompt: currentPrompt }));
-}
-
+/**
+ * Open the conversation view.
+ *
+ * `userText` is undefined for a reopened link: the transcript S2 replays is the
+ * agent's output, so the original message is genuinely not recoverable. Say so
+ * rather than inventing one.
+ */
 function showConversation(userText) {
-	currentPrompt = userText;
-	userMessage.textContent = userText;
+	const known = typeof userText === "string";
+	userMessage.textContent = known ? userText : "";
+	userTurn.hidden = !known;
+	sharedNote.hidden = known;
 	transcript.textContent = "";
 	emptyState.hidden = true;
 	conversation.hidden = false;
@@ -47,7 +63,7 @@ function setBusy(busy, label) {
 
 function handleEvent(name, data) {
 	if (name === "run") {
-		saveSession(data.runId);
+		showRunInUrl(data.runId);
 		status.textContent = data.resumed ? "Resumed from S2" : "Streaming";
 		return;
 	}
@@ -100,7 +116,10 @@ async function connect(url, options, userText, resumed) {
 	setBusy(true, resumed ? "Replaying from S2" : "Thinking");
 
 	try {
-		const response = await fetch(url, { ...options, signal: activeRequest.signal });
+		const response = await fetch(url, {
+			...options,
+			signal: activeRequest.signal,
+		});
 		await consumeEvents(response);
 	} catch (error) {
 		if (error.name === "AbortError") return;
@@ -142,20 +161,28 @@ promptInput.addEventListener("keydown", (event) => {
 
 newChatButton.addEventListener("click", () => {
 	activeRequest?.abort();
-	localStorage.removeItem(storageKey);
+	// A fresh chat is a fresh URL; the previous one keeps working.
+	window.history.replaceState({}, "", "/");
+	copyLinkButton.hidden = true;
 	conversation.hidden = true;
 	emptyState.hidden = false;
-	currentPrompt = "";
 	setBusy(false, "Ready");
 	promptInput.focus();
 });
 
-const session = readSession();
-if (session) {
-	void connect(
-		`/api/runs/${encodeURIComponent(session.runId)}`,
-		{},
-		session.prompt,
-		true,
-	);
+copyLinkButton.addEventListener("click", async () => {
+	try {
+		await navigator.clipboard.writeText(window.location.href);
+		copyLinkButton.textContent = "Copied";
+	} catch {
+		copyLinkButton.textContent = "Copy failed";
+	}
+	setTimeout(() => {
+		copyLinkButton.textContent = "Copy link";
+	}, 1_500);
+});
+
+const openRunId = runIdFromPath();
+if (openRunId) {
+	void connect(`/api/runs/${encodeURIComponent(openRunId)}`, {}, undefined, true);
 }

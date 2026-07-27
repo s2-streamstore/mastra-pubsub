@@ -1,5 +1,5 @@
 // Durable PubSub backed by S2.
-export { S2LeaseProvider } from "./lease.js";
+export { S2LeaseProvider, threadTopic } from "./lease.js";
 export {
 	S2PubSub,
 	type S2PubSubConfig,

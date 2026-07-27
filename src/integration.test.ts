@@ -19,6 +19,7 @@ import type { Event, EventCallback } from "@mastra/core/events";
 import { S2, S2Environment } from "@s2-dev/streamstore";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { threadTopic } from "./lease.js";
 import { S2PubSub } from "./pubsub.js";
 
 const accessToken = process.env.S2_ACCESS_TOKEN;
@@ -164,6 +165,26 @@ describeIf("S2PubSub Integration", () => {
 		expect(await leaseB.getLeaseOwner(key)).toBe("b");
 		await leaseB.releaseLease(key, "b");
 		expect(await leaseA.getLeaseOwner(key)).toBeUndefined();
+	});
+
+	it("keeps lease state out of the thread topic's events", async () => {
+		const key = `it-${Math.random().toString(36).slice(2)}`;
+		const t = threadTopic(key);
+		const lease = ps.getLeaseProvider();
+
+		await ps.publish(t, makeEvent("chunk", { i: 0 }));
+		expect((await lease.acquireLease(key, "run-1", 30_000)).acquired).toBe(
+			true,
+		);
+		await ps.publish(t, makeEvent("chunk", { i: 1 }));
+		expect(await lease.renewLease(key, "run-1", 30_000)).toBe(true);
+
+		const history = await ps.getHistory(t, 0);
+		expect(history.map((e) => (e.data as { i: number }).i)).toEqual([0, 1]);
+		// Events keep their raw sequence numbers; lease records consume the rest.
+		expect(history.map((e) => e.index)).toEqual([0, 3]);
+		expect(await observer.getLeaseProvider().getLeaseOwner(key)).toBe("run-1");
+		await lease.releaseLease(key, "run-1");
 	});
 
 	it("clearTopic requests stream deletion without throwing", async () => {

@@ -48,6 +48,8 @@ header {
 .identity #status { color: #7f877f; font-size: 11px; }
 .quiet { border: 0; padding: 7px 9px; background: transparent; color: #858d85; font-size: 12px; }
 .quiet:hover { color: #e7eae6; }
+.actions { display: flex; align-items: center; gap: 2px; }
+.shared-note { margin: 0; color: #6d746d; font-size: 12px; line-height: 1.5; }
 
 .messages { overflow-y: auto; padding: 28px 25px; }
 #empty-state { display: grid; height: 100%; margin: 0; place-items: center; color: #646b64; font-size: 14px; }

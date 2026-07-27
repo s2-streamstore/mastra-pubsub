@@ -1,6 +1,8 @@
 {
 	"compilerOptions": {
 		"target": "ES2022",
+		// Matches the library's own lib: it uses `Promise.withResolvers` (ES2024).
+		"lib": ["ES2024"],
 		"module": "NodeNext",
 		"moduleResolution": "NodeNext",
 		"strict": true,

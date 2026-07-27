@@ -16,13 +16,22 @@
 						<span id="status">Ready</span>
 					</div>
 				</div>
-				<button id="new-chat" class="quiet" type="button">New chat</button>
+				<div class="actions">
+					<button id="copy-link" class="quiet" type="button" hidden>
+						Copy link
+					</button>
+					<button id="new-chat" class="quiet" type="button">New chat</button>
+				</div>
 			</header>
 
 			<section id="messages" class="messages" aria-live="polite">
 				<p id="empty-state">Ask me anything.</p>
 				<div id="conversation" hidden>
-					<div class="message user-message">
+					<p id="shared-note" class="shared-note" hidden>
+						Replayed from S2 — the original message is not part of the
+						transcript.
+					</p>
+					<div id="user-turn" class="message user-message">
 						<p id="user-message"></p>
 					</div>
 					<div class="message assistant-message">

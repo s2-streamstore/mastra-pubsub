@@ -1,5 +1,21 @@
+/**
+ * Durable-agent chat over S2, with one shareable link per conversation.
+ *
+ * Each run gets its own URL (`/chat/<runId>`). Opening that link replays the
+ * whole run from S2 and then follows it live, so a refresh, a second tab, or a
+ * colleague with the link all see the same transcript.
+ *
+ * Routes mirror Mastra's own SSE endpoints (`stream` to start, `observe` to
+ * reconnect); the id lives in the path, as it does in Mastra Studio.
+ */
 import { readFile } from "node:fs/promises";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import {
+	createServer,
+	type IncomingMessage,
+	type ServerResponse,
+} from "node:http";
+
+import { AGENT_STREAM_TOPIC } from "@mastra/core/agent/durable";
 
 import {
 	durableResearchAgent as agent,
@@ -7,11 +23,27 @@ import {
 } from "./src/mastra/index.js";
 
 const port = Number(process.env.PORT ?? 4111);
+
+/**
+ * Disconnect a stream that has produced nothing for this long.
+ *
+ * Matches the backstop on Mastra's own observe route. Without it a run that
+ * never reaches a terminal event holds the response open indefinitely.
+ */
+const IDLE_TIMEOUT_MS = 5 * 60 * 1_000;
+
 const publicFiles = new Map([
-	["/", { file: "index.html", contentType: "text/html; charset=utf-8" }],
 	["/app.js", { file: "app.js", contentType: "text/javascript; charset=utf-8" }],
-	["/styles.css", { file: "styles.css", contentType: "text/css; charset=utf-8" }],
+	[
+		"/styles.css",
+		{ file: "styles.css", contentType: "text/css; charset=utf-8" },
+	],
 ]);
+
+/** Whether a path should serve the chat shell: `/`, `/chat/new`, `/chat/<runId>`. */
+function isAppShell(pathname: string): boolean {
+	return pathname === "/" || /^\/chat\/[^/]+$/.test(pathname);
+}
 
 function sendEvent(
 	response: ServerResponse,
@@ -49,15 +81,41 @@ function chunkType(value: unknown): string {
 	return typeof type === "string" ? type : "unknown";
 }
 
+/**
+ * Whether a run still has a transcript to replay.
+ *
+ * `observe()` does not validate its runId: on an unknown or already-cleaned-up
+ * run it yields no chunks and never finishes, which strands a client on a
+ * shared link forever. S2 is the replay store, so an empty history is the
+ * authoritative "nothing here" — check it before opening the observer.
+ */
+async function hasTranscript(runId: string): Promise<boolean> {
+	const history = await pubsub.getHistory(AGENT_STREAM_TOPIC(runId));
+	return history.length > 0;
+}
+
 async function pipeStream<T>(
 	reader: ReadableStreamDefaultReader<T>,
 	response: ServerResponse,
 ): Promise<void> {
 	let completed = false;
-	const cancel = () => {
-		if (!completed) void reader.cancel("browser disconnected").catch(() => {});
+	let timedOut = false;
+	let idleTimer: NodeJS.Timeout | undefined;
+
+	const cancel = (reason: string) => {
+		if (!completed) void reader.cancel(reason).catch(() => {});
 	};
-	response.once("close", cancel);
+	const onClose = () => cancel("browser disconnected");
+	response.once("close", onClose);
+
+	const resetIdleTimer = () => {
+		if (idleTimer) clearTimeout(idleTimer);
+		idleTimer = setTimeout(() => {
+			timedOut = true;
+			cancel("idle timeout");
+		}, IDLE_TIMEOUT_MS);
+	};
+	resetIdleTimer();
 
 	try {
 		while (!response.destroyed) {
@@ -66,13 +124,20 @@ async function pipeStream<T>(
 				completed = true;
 				break;
 			}
+			resetIdleTimer();
 			sendEvent(response, "chunk", {
 				type: chunkType(result.value),
 				text: textFromChunk(result.value),
 			});
 		}
 		if (!response.destroyed) {
-			sendEvent(response, "done", {});
+			if (timedOut) {
+				sendEvent(response, "error", {
+					message: "The run went idle, so the stream was closed.",
+				});
+			} else {
+				sendEvent(response, "done", {});
+			}
 			response.end();
 		}
 	} catch (error) {
@@ -83,8 +148,11 @@ async function pipeStream<T>(
 			response.end();
 		}
 	} finally {
-		response.off("close", cancel);
-		if (!completed) await reader.cancel("stream response ended").catch(() => {});
+		if (idleTimer) clearTimeout(idleTimer);
+		response.off("close", onClose);
+		if (!completed) {
+			await reader.cancel("stream response ended").catch(() => {});
+		}
 		reader.releaseLock();
 	}
 }
@@ -109,33 +177,41 @@ async function readPrompt(request: IncomingMessage): Promise<string> {
 }
 
 async function serveStatic(pathname: string, response: ServerResponse) {
-	const asset = publicFiles.get(pathname);
-	if (!asset) return false;
-	let body: Buffer | string;
-	if (pathname === "/") {
+	if (isAppShell(pathname)) {
 		const [html, css] = await Promise.all([
 			readFile(new URL("./public/index.html", import.meta.url), "utf8"),
 			readFile(new URL("./public/styles.css", import.meta.url), "utf8"),
 		]);
-		body = html.replace(
-			'<link rel="stylesheet" href="/styles.css" />',
-			`<style>${css}</style>`,
+		response.writeHead(200, {
+			"Cache-Control": "no-store",
+			"Content-Type": "text/html; charset=utf-8",
+		});
+		response.end(
+			html.replace(
+				'<link rel="stylesheet" href="/styles.css" />',
+				`<style>${css}</style>`,
+			),
 		);
-	} else {
-		body = await readFile(new URL(`./public/${asset.file}`, import.meta.url));
+		return true;
 	}
+
+	const asset = publicFiles.get(pathname);
+	if (!asset) return false;
 	response.writeHead(200, {
 		"Cache-Control": "no-store",
 		"Content-Type": asset.contentType,
 	});
-	response.end(body);
+	response.end(await readFile(new URL(`./public/${asset.file}`, import.meta.url)));
 	return true;
 }
 
 const server = createServer(async (request, response) => {
 	try {
 		const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
-		if (request.method === "GET" && (await serveStatic(url.pathname, response))) {
+		if (
+			request.method === "GET" &&
+			(await serveStatic(url.pathname, response))
+		) {
 			return;
 		}
 
@@ -143,6 +219,8 @@ const server = createServer(async (request, response) => {
 			const prompt = await readPrompt(request);
 			const started = await agent.stream(prompt);
 			startEventStream(response);
+			// The client swaps this into the address bar, so the link is shareable
+			// from the first token onward.
 			sendEvent(response, "run", { runId: started.runId, resumed: false });
 			await pipeStream(started.output.fullStream.getReader(), response);
 			return;
@@ -151,6 +229,16 @@ const server = createServer(async (request, response) => {
 		const match = /^\/api\/runs\/([^/]+)$/.exec(url.pathname);
 		if (request.method === "GET" && match?.[1]) {
 			const runId = decodeURIComponent(match[1]);
+			if (!(await hasTranscript(runId))) {
+				response.writeHead(404, { "Content-Type": "application/json" });
+				response.end(
+					JSON.stringify({
+						error:
+							"That conversation is no longer available. Its transcript has been cleaned up.",
+					}),
+				);
+				return;
+			}
 			const observed = await agent.observe(runId);
 			startEventStream(response);
 			sendEvent(response, "run", { runId, resumed: true });
@@ -177,25 +265,23 @@ server.listen(port, () => {
 	console.info(`[demo] S2 durable-agent UI: http://localhost:${port}`);
 });
 
+/**
+ * Re-drive runs left RUNNING by a crashed process.
+ *
+ * Opt-in, mirroring Mastra's `recovery.durableAgents` config, which defaults to
+ * `'off'`: recovery replays the agentic loop, so it re-issues LLM calls and
+ * re-runs tools. Firing it on every restart quietly spends money and repeats
+ * side effects, and in a multi-replica deploy every replica races for the same
+ * runs. Set `RECOVER_ON_BOOT=true` to enable it.
+ */
 async function recoverActiveRuns(): Promise<void> {
-	const { runs } = await agent.listActiveRuns();
-	await Promise.all(
-		runs.map(async ({ runId }) => {
-			try {
-				const recovered = await agent.recover(runId);
-				for await (const _chunk of recovered.output.fullStream) {
-					// Drain the observer so recovery does not buffer its output in memory.
-				}
-				console.info(`[demo] Recovered durable run ${runId}`);
-			} catch (error) {
-				console.error(`[demo] Failed to recover durable run ${runId}`, error);
-			}
-		}),
-	);
+	if (process.env.RECOVER_ON_BOOT !== "true") return;
+	const { succeeded, failed } = await agent.recoverActiveRuns();
+	console.info(`[demo] Durable run recovery: ${succeeded} ok, ${failed} failed`);
 }
 
 void recoverActiveRuns().catch((error) => {
-	console.error("[demo] Failed to discover active durable runs", error);
+	console.error("[demo] Failed to recover active durable runs", error);
 });
 
 async function shutdown() {
