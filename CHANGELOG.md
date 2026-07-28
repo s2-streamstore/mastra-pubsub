@@ -1,5 +1,11 @@
 # @s2-dev/mastra-pubsub
 
+## 0.2.1
+
+### Patch Changes
+
+- 94319e6: Deduplicate concurrent subscriptions that register the same callback for a topic, preventing duplicate S2 readers, duplicate event delivery, and an untracked reader after unsubscribe.
+
 ## 0.2.0
 
 ### Minor Changes
