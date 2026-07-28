@@ -487,6 +487,42 @@ describe("S2PubSub read-session live delivery", () => {
 		await pubsub.unsubscribe("agent.stream.run-1", cb);
 	});
 
+	it("awaits async subscriber callbacks in record order", async () => {
+		const basin = new FakeBasin();
+		const publisher = createPubSub(basin);
+		const subscriber = createPubSub(basin);
+		const started: number[] = [];
+		const completed: number[] = [];
+		const firstStarted = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const cb: EventCallback = async (value) => {
+			const index = (value.data as { i: number }).i;
+			started.push(index);
+			if (index === 0) {
+				firstStarted.resolve();
+				await releaseFirst.promise;
+			}
+			completed.push(index);
+		};
+
+		await subscriber.subscribe("agent.stream.run-1", cb);
+		await publisher.publish("agent.stream.run-1", event(0));
+		await firstStarted.promise;
+		await publisher.publish("agent.stream.run-1", event(1));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+
+		const startedBeforeRelease = [...started];
+		const completedBeforeRelease = [...completed];
+		releaseFirst.resolve();
+		await waitFor(() => completed.length === 2);
+
+		expect(startedBeforeRelease).toEqual([0]);
+		expect(completedBeforeRelease).toEqual([]);
+		expect(started).toEqual([0, 1]);
+		expect(completed).toEqual([0, 1]);
+		await subscriber.unsubscribe("agent.stream.run-1", cb);
+	});
+
 	it("rejects malformed persisted records instead of replaying empty events", async () => {
 		const basin = new FakeBasin();
 		const pubsub = createPubSub(basin);

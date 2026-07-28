@@ -102,6 +102,13 @@ const client = new S2({
 const pubsub = new S2PubSub({ client, basin: process.env.S2_BASIN! });
 ```
 
+S2-delivered subscriber callbacks run one at a time per subscription. The
+adapter awaits each callback before reading the next record, preserving stream
+order and applying backpressure when a callback is slow. A callback that never
+settles stalls that subscription. A callback rejection is logged and that
+record is considered delivered; broadcast observers do not provide
+acknowledgement or callback-level redelivery.
+
 Events use JavaScript's standard `JSON.stringify` semantics. Before appending,
 the adapter validates the exact serialized record, so top-level values that
 cannot represent the required event fields — for example `data: undefined`, a

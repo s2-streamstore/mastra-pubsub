@@ -601,15 +601,17 @@ export class S2PubSub extends CachingPubSub {
 								);
 							}
 						}
-						state.nextSeqNum = record.seqNum + 1;
-						reconnectAttempt = 0;
 						// S2 command records share the stream; they are not events.
 						if (!isControlRecord(record)) {
-							this.invokeSubscriber(
+							await this.invokeSubscriber(
 								state,
 								eventFromRecord(record, state.topic),
 							);
 						}
+						// Advance only after delivery finishes so reconnects cannot skip
+						// a callback that was still running when the session failed.
+						state.nextSeqNum = record.seqNum + 1;
+						reconnectAttempt = 0;
 						this.settleReady(state);
 					}
 				} catch (error) {
@@ -691,19 +693,19 @@ export class S2PubSub extends CachingPubSub {
 		}
 	}
 
-	/** Invoke a subscriber without blocking later records. */
-	private invokeSubscriber(state: Subscription, event: Event): void {
-		const onError = (error: unknown) => {
+	/** Await one subscriber invocation to preserve order and apply backpressure. */
+	private async invokeSubscriber(
+		state: Subscription,
+		event: Event,
+	): Promise<void> {
+		try {
+			await state.callback(event);
+		} catch (error) {
 			logError(
 				this.s2Logger,
 				`[S2PubSub] Subscriber callback failed for ${state.topic}`,
 				error,
 			);
-		};
-		try {
-			void Promise.resolve(state.callback(event)).catch(onError);
-		} catch (error) {
-			onError(error);
 		}
 	}
 
