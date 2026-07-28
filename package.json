@@ -4,9 +4,6 @@
   "description": "Durable Mastra PubSub backed by S2 streams for Durable Agents",
   "license": "MIT",
   "type": "module",
-  "workspaces": [
-    "examples/durable-agents"
-  ],
   "homepage": "https://s2.dev",
   "repository": {
     "type": "git",
