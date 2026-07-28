@@ -21,6 +21,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Validate Changesets release plan
+        run: bunx changeset status
+
       - name: Typecheck
         run: bun run check
 
