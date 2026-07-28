@@ -274,6 +274,31 @@ describe("S2PubSub read-session live delivery", () => {
 		await subscriber.unsubscribe("agent.stream.run-1", cb);
 	});
 
+	it("deduplicates concurrent subscriptions for the same callback", async () => {
+		const basin = new FakeBasin();
+		const publisher = createPubSub(basin);
+		const subscriber = createPubSub(basin);
+		const received: Event[] = [];
+		const cb: EventCallback = (value) => received.push(value);
+		const topic = "agent.stream.run-1";
+		const stream = basin.stream(`mastra/durable/${topic}`);
+
+		await Promise.all([
+			subscriber.subscribe(topic, cb),
+			subscriber.subscribe(topic, cb),
+		]);
+
+		expect(stream.sessionCount).toBe(1);
+		expect(stream.sessions.size).toBe(1);
+		await publisher.publish(topic, event(0));
+		await waitFor(() => received.length === 1);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(received).toHaveLength(1);
+
+		await subscriber.unsubscribe(topic, cb);
+		expect(stream.sessions.size).toBe(0);
+	});
+
 	it("replays and follows live through one S2 read session", async () => {
 		const basin = new FakeBasin();
 		const publisher = createPubSub(basin);
