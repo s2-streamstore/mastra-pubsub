@@ -1,6 +1,6 @@
 {
   "name": "@s2-dev/mastra-pubsub",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Durable Mastra PubSub backed by S2 streams for Durable Agents",
   "license": "MIT",
   "type": "module",
