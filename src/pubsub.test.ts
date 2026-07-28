@@ -546,13 +546,13 @@ describe("S2PubSub read-session live delivery", () => {
 		await pubsub.publish(topic, event(1));
 		await waitFor(() => received.length === 2);
 
-		// fence + lease state + event + renewed lease state + event.
+		// Inline lease fence + event + renewed fence + event.
 		const stream = basin.stream(`mastra/durable/${topic}`);
-		expect(stream.records).toHaveLength(5);
+		expect(stream.records).toHaveLength(4);
 		// Subscribers and history see only the events, indexed by raw seqNum.
-		expect(received.map((e) => e.index)).toEqual([2, 4]);
+		expect(received.map((e) => e.index)).toEqual([1, 3]);
 		expect((await pubsub.getHistory(topic, 0)).map((e) => e.index)).toEqual([
-			2, 4,
+			1, 3,
 		]);
 		expect(await lease.getLeaseOwner(key)).toBe("run-1");
 		await pubsub.unsubscribe(topic, cb);
@@ -573,7 +573,7 @@ describe("S2PubSub read-session live delivery", () => {
 
 		await pubsub.subscribeFromOffset(topic, 0, cb);
 		await waitFor(() => indexes.length === 2);
-		expect(indexes).toEqual([0, 3]);
+		expect(indexes).toEqual([0, 2]);
 		await pubsub.unsubscribe(topic, cb);
 	});
 
