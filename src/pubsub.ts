@@ -527,8 +527,6 @@ export class S2PubSub extends CachingPubSub {
 			return;
 		}
 
-		// Also receive local-only events.
-		await this.local.subscribe(topic, callback);
 		const state: Subscription = {
 			topic,
 			callback,
@@ -542,6 +540,8 @@ export class S2PubSub extends CachingPubSub {
 		};
 		const byCallback = this.subscriptions.get(topic) ?? new Map();
 		this.subscriptions.set(topic, byCallback);
+		// Reserve this callback before starting asynchronous registration so
+		// concurrent subscribe calls share this state and its readiness promise.
 		byCallback.set(callback, state);
 		state.task = this.runSubscription(state);
 		await state.ready.promise;
@@ -555,11 +555,19 @@ export class S2PubSub extends CachingPubSub {
 		else state.ready.reject(error);
 	}
 
-	/** Read records in order and reconnect from the last position. */
+	/** Register local delivery, then read records and reconnect from the cursor. */
 	private async runSubscription(state: Subscription): Promise<void> {
 		const { signal } = state.abortController;
 		let reconnectAttempt = 0;
 		try {
+			// Persisted-topic subscribers also receive explicit local-only events.
+			try {
+				await this.local.subscribe(state.topic, state.callback);
+			} catch (error) {
+				this.settleReady(state, error);
+				return;
+			}
+
 			while (!signal.aborted) {
 				let reader: Subscription["activeReader"];
 				try {
