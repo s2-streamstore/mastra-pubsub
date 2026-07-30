@@ -405,7 +405,7 @@
 
     "@rollup/rollup-win32-x64-msvc": ["@rollup/rollup-win32-x64-msvc@4.62.2", "", { "os": "win32", "cpu": "x64" }, "sha512-BfzEnDJOt9T8M989/lA37EcJgat01wLRnoi5dQf3QzOH7jzpqTAzdDbVfRljVr5r+jzKqpbHeyOfAaXxAd0PAA=="],
 
-    "@s2-dev/mastra-pubsub": ["@s2-dev/mastra-pubsub@file:../..", { "dependencies": { "@s2-dev/streamstore": "^0.24.3" }, "devDependencies": { "@biomejs/biome": "2.2.5", "@changesets/cli": "^2.29.7", "@mastra/core": "1.51.0", "@types/node": "^24.9.2", "typescript": "^5.9.3", "vitest": "^4.0.10" }, "peerDependencies": { "@mastra/core": ">=1.45.0-0 <2.0.0-0" } }],
+    "@s2-dev/mastra-pubsub": ["@s2-dev/mastra-pubsub@file:../..", { "dependencies": { "@s2-dev/streamstore": "^0.24.3" }, "devDependencies": { "@biomejs/biome": "2.2.5", "@changesets/cli": "^2.29.7", "@mastra/core": "1.51.0", "@types/node": "^24.9.2", "typescript": "^5.9.3", "vitest": "^4.0.10" }, "peerDependencies": { "@mastra/core": ">=1.46.0-0 <2.0.0-0" } }],
 
     "@s2-dev/streamstore": ["@s2-dev/streamstore@0.24.3", "", { "dependencies": { "@protobuf-ts/runtime": "^2.11.1", "debug": "^4.4.3" } }, "sha512-X72qc/bSI/xvF7AgxHnPsgyNdgjsUtXlqa9AohIpUbZe94aLBinPAgKNcd8KCGo5cftPBcsKVhJZot49Vb687Q=="],
 
