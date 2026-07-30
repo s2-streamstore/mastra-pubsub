@@ -40,7 +40,7 @@
     "@s2-dev/streamstore": "^0.24.3"
   },
   "peerDependencies": {
-    "@mastra/core": ">=1.45.0-0 <2.0.0-0"
+    "@mastra/core": ">=1.46.0-0 <2.0.0-0"
   },
   "devDependencies": {
     "@biomejs/biome": "2.2.5",
