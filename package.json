@@ -32,7 +32,7 @@
     "test": "vitest --run",
     "changeset": "changeset",
     "version": "changeset version",
-    "release": "changeset publish",
+    "release": "node scripts/stage-publish.mjs",
     "prepublishOnly": "bun run build"
   },
   "sideEffects": false,
